@@ -1,0 +1,323 @@
+---
+title: "Megakaryocyte ROI incorporation"
+author: "Geoff Ivison"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(emconnect)
+library(SpatialMap)
+library(ggplot2)
+library(sf)
+```
+
+# Introduction
+
+The data for this project includes a number of megakaryocytes, which have very large and irregularly shaped nuclei. Deepcell/mesmer unfortunately performs pretty poorly and inconsistently at segmenting this cell type.
+
+We created [a story in the visualizer](https://app.enablemedicine.com/share/vis/nI__XY) that marks each of these megakaryocytes in the dataset with a lasso ROI. While the original plan was to use these to create an annotation set and then "merge" these marked sub-cells into whole cells, we determined that using these ROIs as surrogate whole-cell segmentation masks was a more robust approach.
+
+The goal of this notebook is to establish a proof of concept of an approach to incorporate the centroids of these megakaryocyte ROIs as custom "cells" into a SpatialMap object, to facilitate using the tools in the SpatialMap package for analyses that consider these megakaryocytes.
+
+
+
+```{r}
+# First, pulling in the dataset.
+sm <- readRDS("sm_annotation_final_with_fatDroplets.RDS")
+```
+
+
+Pick only the most recent clustering based annotation set as a starting point. The labels of the new megakaryocyte objects will be appended to this annotation set.
+
+```{r define global variables}
+con <- emconnect()
+
+FINAL_ANNO_NAME <- "anno10001_All_cells_combined_Final"
+
+MEGAKARYOCYTE_STORY_NAME <- "Megakaryocyte"
+
+DEMO_REGION <- "SchuerchCMLBM_c001_v001_r002_reg001"
+```
+
+
+
+```{r}
+# Extracting the metadata from the `sm` object.
+metadata <- projectMetadata(sm)
+```
+
+
+Pulling the ROI coordinates for the megakaryocyte story.
+
+```{r}
+megakaryocyte_ROIs <- get_stories(acquisition_ids = metadata$acquisition_id) %>%
+  filter(story_title == MEGAKARYOCYTE_STORY_NAME)
+
+# Some accidental ROIs with fewer than 3 points got added to the story
+# filtering them out here
+
+ROIs_at_least_three_coords <- megakaryocyte_ROIs %>%
+  group_by(roi_id) %>%
+  summarize(count = n()) %>%
+  filter(count >= 3)
+
+megakaryocyte_ROIs <- left_join(ROIs_at_least_three_coords, megakaryocyte_ROIs)
+```
+
+Plot a pair of nearby ROIs just to make sure it's looking right.
+
+```{r}
+# Pick one region
+demo_region_ROIs <- megakaryocyte_ROIs %>%
+  filter(acquisition_id == DEMO_REGION)
+
+# Get super rough centroids by averaging each ROI. Not robust enough for later
+# but good enough for picking two nearby ones
+
+demo_region_ROIs <- demo_region_ROIs %>%
+  group_by(roi_id) %>%
+  summarize(avg_x = mean(x),
+            avg_y = mean(y))
+
+demo_ROIs_dist <- dist(data.frame(x = demo_region_ROIs$avg_x,
+                                  y = demo_region_ROIs$avg_y))
+
+close_pair <- which(as.matrix(demo_ROIs_dist)==min(demo_ROIs_dist),arr.ind=TRUE)
+
+demo_ROI_IDs <- c(demo_region_ROIs$roi_id[close_pair[1,1]], demo_region_ROIs$roi_id[close_pair[1,2]])
+
+demo_ROIs <- megakaryocyte_ROIs %>%
+  filter(roi_id %in% demo_ROI_IDs) %>%
+  # Just to put it closer to the origin
+  mutate(x = x - min(x),
+         y = y - min(y),
+         roi_id = as.character(roi_id))
+
+ggplot(demo_ROIs, aes(x = x, y = y, color = roi_id)) +
+  geom_point()
+```
+
+# Identifying megakaryocyte coordinates
+
+For each ROI, calculate the center of that ROI. Then split out by region for the next operation.
+
+Will test this out on the demo ROIs pulled in the previous section.
+
+```{r}
+megak_as_sf <- demo_ROIs %>%
+  st_as_sf(coords = c("x", "y")) %>%
+  group_by(roi_id) %>%
+  summarise(geometry = st_combine(geometry)) %>%
+  st_cast("POLYGON")
+
+# plot(megak_as_sf)
+
+megak_centroids <- st_centroid(megak_as_sf) %>%
+  st_coordinates() %>%
+  as_tibble() %>%
+  mutate(roi_id = megak_as_sf$roi_id) %>%
+  rename(x = X, y = Y)
+
+ggplot(demo_ROIs, aes(x = x, y = y, color = roi_id)) +
+  geom_point() +
+  geom_point(data = megak_centroids, shape = "x", size = 5)
+```
+
+Looks great! Will generalize this to the entire object.
+
+Will start by defining a helper function.
+
+```{r}
+summarize_to_centroids <- function(df) {
+  megak_as_sf <- df %>%
+    st_as_sf(coords = c("x", "y")) %>%
+    # Makes some assumptions about the df object
+    group_by(roi_id) %>%
+    summarise(geometry = st_combine(geometry)) %>%
+    st_cast("POLYGON")
+  
+  suppressWarnings(megak_centroids <- st_centroid(megak_as_sf) %>%
+                     st_coordinates() %>%
+                     as_tibble() %>%
+                     mutate(roi_id = megak_as_sf$roi_id,
+                            # Want integer pixel coordinates
+                            X = round(X),
+                            Y = round(Y)) %>%
+                     rename(centroid_x = X, centroid_y = Y))
+  
+  return(megak_centroids)
+}
+```
+
+
+And then run that for each acquisition ID
+
+```{r}
+megakaryocyte_ROI_list <- megakaryocyte_ROIs %>%
+  group_split(acquisition_id)
+
+reg_names <- purrr::map_chr(megakaryocyte_ROI_list,
+                            \(df) unique(df$acquisition_id))
+
+names(megakaryocyte_ROI_list) <- reg_names
+
+megakaryocyte_centroids <- purrr::map(megakaryocyte_ROI_list,
+                                      summarize_to_centroids)
+```
+
+# Adding megakaryocyte coordinates into SpatialMap object
+
+For each region, add the megakaryocyte centroids. Will have to fill in dummy data for the "Data", "NormalizedData", "ScaledData", and "bgData" slots--these values will be filled with zeroes.
+
+Since this is a region-by-region operation, will start by defining a helper function and then use `.smapply`
+
+```{r}
+# Will use for expanding project metadata values to fill in cellMetadata
+pm_cols <- colnames(projectMetadata(sm))
+
+add_megakaryocytes <- function(region,
+                               megakaryocyte_centroids) {
+  acquisition_id <- region@id
+  
+  megakaryocytes <- megakaryocyte_centroids[[acquisition_id]]
+  
+  # If there aren't any megakaryocyte centroids to add, just return the unmodified region
+  if (is.null(megakaryocytes)) return(region)
+  
+  base_cell.ids <- cells(region)[[1]]
+  base_spatial <- embeddings(region, "spatial") %>%
+    # Need to un-invert the y-axis to put these into 
+    # the same coordinate space as the ROIs
+    as_tibble() %>%
+    mutate(y = facil::inv(y))
+  base_dat <- Data(region, "Data")
+  base_normdat <- Data(region, "NormalizedData")
+  base_scaledat <- Data(region, "ScaledData")
+  base_bg <- Data(region, "bgData")
+  base_chInfo <- channelInfo(region)
+  base_cm <- cellMetadata(region)
+  base_features <- features(region)
+  
+  # Will start megakaryocyte centroid numbering at the highest cell number + 1
+  max_base_cell_id <- max(base_cm$cell_id)
+  num_megakaryocytes <- nrow(megakaryocytes)
+  # Creating cell.ids
+  megakaryocyte_ids <- seq(from = max_base_cell_id + 1,
+                           to = max_base_cell_id + num_megakaryocytes)
+  megakaryocyte.ids <- paste0(acquisition_id, ".", megakaryocyte_ids)
+  # Creating spatial data slot
+  # Leaving as a data frame for now so we can re-invert the coordinates
+  # So plots will match the orientation in the visualizer
+  megakaryocyte_spatial <- tibble(x = megakaryocytes$centroid_x,
+                                  y = megakaryocytes$centroid_y)
+  # Creating dummy data and bgData
+  megakaryocyte_dat <- matrix(data = 0,
+                              nrow = nrow(base_dat),
+                              ncol = num_megakaryocytes)
+  rownames(megakaryocyte_dat) <- rownames(base_dat)
+  colnames(megakaryocyte_dat) <- megakaryocyte.ids
+  megakaryocyte_bg <- matrix(data = 0,
+                             nrow = nrow(base_bg),
+                             ncol = num_megakaryocytes)
+  rownames(megakaryocyte_bg) <- rownames(base_bg)
+  colnames(megakaryocyte_dat) <- megakaryocyte.ids
+  # Creating dummy cellMetadata
+  # Will full join and fill in columns from project metadata
+  megakaryocyte_cm <- tibble(cell.id = megakaryocyte.ids,
+                             cell_id = megakaryocyte_ids) %>%
+    mutate(!!FINAL_ANNO_NAME := "Megakaryocyte")
+  # No changes to chInfo or features
+  
+  updated_cell.ids <- c(base_cell.ids, megakaryocyte.ids)
+  # Re-inverting y coordinate so plots match visualizer orientation
+  updated_spatial <- bind_rows(base_spatial, megakaryocyte_spatial) %>%
+    mutate(y = facil::inv(y)) %>%
+    as.matrix() %>%
+    magrittr::set_rownames(updated_cell.ids)
+  # cbind because these matrices are oriented differently than the spatial
+  updated_dat <- cbind(base_dat, megakaryocyte_dat)
+  updated_normdat <- cbind(base_normdat, megakaryocyte_dat)
+  updated_scaledat <- cbind(base_scaledat, megakaryocyte_dat)
+  updated_bg <- cbind(base_dat, megakaryocyte_dat)
+  # Full join and then fill in the project metadata columns that were merged
+  # All other columns in the cell metadata will be left as `NA`
+  suppressMessages(
+    updated_cm <- full_join(base_cm, megakaryocyte_cm) %>%
+      tidyr::fill(all_of(pm_cols)) %>%
+      magrittr::set_rownames(updated_cell.ids)
+  )
+  
+  # Reassembling modified region object
+  region_with_megakaryocytes <- createRegionObject(
+    id = acquisition_id,
+    coordinates = updated_spatial,
+    Data = updated_dat,
+    NormalizedData = updated_normdat,
+    ScaledData = updated_scaledat,
+    bgData = updated_bg,
+    cellMetadata = updated_cm,
+    channelInfo = base_chInfo,
+    features = base_features,
+    auto.spatial.representation = T
+  )
+  
+  return(region_with_megakaryocytes)
+}
+```
+
+With those values defined, running `.smapply`.
+
+```{r}
+sm <- .smapply(sm,
+               add_megakaryocytes,
+               megakaryocyte_centroids = megakaryocyte_centroids,
+               parallel = TRUE,
+               cores = 4,
+               analyze = "regions")
+```
+
+Some validity checks.
+
+Are the cell labels in place?
+
+```{r}
+cellMetadata(sm)[[FINAL_ANNO_NAME]] %>% unique()
+```
+
+Are the megakaryocytes in the right location spatially, and spatial representations are oriented correctly?
+
+```{r fig.height=10, fig.width=10}
+demo_RDL <- projectMetadata(sm) %>%
+  filter(acquisition_id == DEMO_REGION) %>%
+  pull(region_display_label)
+
+plotRepresentation(sm[["SchuerchCMLBM_c001_v001_r002_reg001"]], "spatial",
+                   what = FINAL_ANNO_NAME) +
+  gghighlight::gghighlight(variable == "Megakaryocyte",
+                           use_group_by = FALSE) +
+  ggtitle(demo_RDL)
+```
+
+Looks good!
+
+Saving the output.
+
+```{r}
+saveRDS(sm, file = "sm_annotation_final_with_fatDroplets_megakaryocytes.RDS")
+```
+
+***
+
+# Session info
+
+<details><summary>Click to expand</summary>
+
+```{r session info, results='markup'}
+sessionInfo()
+```
+</details>
+
+

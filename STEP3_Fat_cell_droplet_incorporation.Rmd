@@ -1,0 +1,231 @@
+---
+title: "Fat cell droplet incorporation"
+author: "Geoff Ivison"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(emconnect)
+library(SpatialMap)
+library(ggplot2)
+```
+
+
+# Introduction
+
+The data for this project includes large fat droplets that have cell nuclei on the periphery. It's difficult to unambiguously assign one of these nuclei to the fat cell, or indeed know for certain whether one of those nuclei is the fat cell's nucleus. Additionally, for the purpose of cell-cell interactions, it may be of more interest to consider distance of cell's neighbors to the centroid of a fat cell's droplet, since that's a better representation of the center of the entire cell's mass.
+
+We created [a story in the visualizer](https://app.enablemedicine.com/share/vis/n3daYN) where the centroids of each fat cell droplet in the images in this study have been marked with rectangular ROIs. The goal of this notebook is to incorporate these coordinates as custom "cells" into a SpatialMap object, to facilitate using the tools in the SpatialMap package for analyses that consider these fat cell droplets.
+
+# Loading data
+
+First, pulling in the dataset.
+
+```{r}
+# Load the RDS file containing the final annotated cell dataset 
+sm <- readRDS("sm_annotation_final.RDS")
+```
+
+The starting point will be `"anno10001_All_cells_combined_Final"`. The labels of the new fat cell objects will be appended to this annotation set.
+
+```{r define global variables}
+con <- emconnect()
+
+FINAL_ANNO_NAME <- "anno10001_All_cells_combined_Final"
+
+FAT_CELL_STORY_NAME <- "Fat cells"
+```
+
+
+
+```{r}
+# Extracting the metadata from the `sm` object.
+metadata <- projectMetadata(sm)
+```
+
+Pulling the ROI coordinates for the fat cell story.
+
+```{r}
+fat_cell_ROIs <- get_stories(acquisition_ids = metadata$acquisition_id) %>%
+  filter(story_title == FAT_CELL_STORY_NAME)
+```
+
+# Identifying fat cell coordinates
+
+For each ROI, calculate the center of that ROI. Then split out by region for the next operation
+
+```{r}
+fat_cell_centroids <- fat_cell_ROIs %>%
+  group_by(acquisition_id, roi_id) %>%
+  summarize(centroid_x = ceiling(mean(x)), # Rounding up bc it will always be 0.5 if not an integer
+            centroid_y = ceiling(mean(y))) %>%
+  group_split()
+
+reg_names <- purrr::map_chr(fat_cell_centroids,
+                            \(df) unique(df$acquisition_id))
+
+names(fat_cell_centroids) <- reg_names
+
+# Annoying kludge to make list indexing work in the .smapply call
+# why is dplyr like this
+class(fat_cell_centroids) <- "list"
+```
+
+# Adding fat cell coordinates into SpatialMap object
+
+For each region, add the fat cell centroids. Will have to fill in dummy data for the "Data", "NormalizedData", "ScaledData", and "bgData" slots--these values will be filled with zeroes.
+
+Since this is a region-by-region operation, will start by defining a helper function and then use `.smapply`
+
+```{r}
+# Will use for expanding project metadata values to fill in cellMetadata
+pm_cols <- colnames(projectMetadata(sm))
+
+add_fat_cells <- function(region,
+                          fat_cell_centroids) {
+  acquisition_id <- region@id
+  
+  fat_cells <- fat_cell_centroids[[acquisition_id]]
+    
+  # If there aren't any fat cell centroids to add, just return the unmodified region
+  if (is.null(fat_cells)) return(region)
+  
+  base_cell.ids <- cells(region)[[1]]
+  base_spatial <- embeddings(region, "spatial") %>%
+    # Need to un-invert the y-axis to put these into 
+    # the same coordinate space as the ROIs
+    as_tibble() %>%
+    mutate(y = facil::inv(y))
+  base_dat <- Data(region, "Data")
+  base_normdat <- Data(region, "NormalizedData")
+  base_scaledat <- Data(region, "ScaledData")
+  base_bg <- Data(region, "bgData")
+  base_chInfo <- channelInfo(region)
+  base_cm <- cellMetadata(region)
+  base_features <- features(region)
+  
+  # Will start fat cell centroid numbering at the highest cell number + 1
+  max_base_cell_id <- max(base_cm$cell_id)
+  num_fat_cells <- nrow(fat_cells)
+  # Creating cell.ids
+  fat_cell_ids <- seq(from = max_base_cell_id + 1,
+                      to = max_base_cell_id + num_fat_cells)
+  fat_cell.ids <- paste0(acquisition_id, ".", fat_cell_ids)
+  # Creating spatial data slot
+  # Leaving as a data frame for now so we can re-invert the coordinates
+  # So plots will match the orientation in the visualizer
+  fat_cell_spatial <- tibble(x = fat_cells$centroid_x,
+                             y = fat_cells$centroid_y)
+  # Creating dummy data and bgData
+  fat_cell_dat <- matrix(data = 0,
+                         nrow = nrow(base_dat),
+                         ncol = num_fat_cells)
+  rownames(fat_cell_dat) <- rownames(base_dat)
+  colnames(fat_cell_dat) <- fat_cell.ids
+  fat_cell_bg <- matrix(data = 0,
+                        nrow = nrow(base_bg),
+                        ncol = num_fat_cells)
+  rownames(fat_cell_bg) <- rownames(base_bg)
+  colnames(fat_cell_dat) <- fat_cell.ids
+  # Creating dummy cellMetadata
+  # Will full join and fill in columns from project metadata
+  fat_cell_cm <- tibble(cell.id = fat_cell.ids,
+                        cell_id = fat_cell_ids) %>%
+    mutate(!!FINAL_ANNO_NAME := "Fat droplet centroid")
+  # No changes to chInfo or features
+  
+  updated_cell.ids <- c(base_cell.ids, fat_cell.ids)
+  # Re-inverting y coordinate so plots match visualizer orientation
+  updated_spatial <- bind_rows(base_spatial, fat_cell_spatial) %>%
+    mutate(y = facil::inv(y)) %>%
+    as.matrix() %>%
+    magrittr::set_rownames(updated_cell.ids)
+  # cbind because these matrices are oriented differently than the spatial
+  updated_dat <- cbind(base_dat, fat_cell_dat)
+  updated_normdat <- cbind(base_normdat, fat_cell_dat)
+  updated_scaledat <- cbind(base_scaledat, fat_cell_dat)
+  updated_bg <- cbind(base_dat, fat_cell_dat)
+  # Full join and then fill in the project metadata columns that were merged
+  # All other columns in the cell metadata will be left as `NA`
+  suppressMessages(
+    updated_cm <- full_join(base_cm, fat_cell_cm) %>%
+      tidyr::fill(all_of(pm_cols)) %>%
+      magrittr::set_rownames(updated_cell.ids)
+  )
+  
+  # Reassembling modified region object
+  region_with_fat_cells <- createRegionObject(
+    id = acquisition_id,
+    coordinates = updated_spatial,
+    Data = updated_dat,
+    NormalizedData = updated_normdat,
+    ScaledData = updated_scaledat,
+    bgData = updated_bg,
+    cellMetadata = updated_cm,
+    channelInfo = base_chInfo,
+    features = base_features,
+    auto.spatial.representation = T
+  )
+  
+  return(region_with_fat_cells)
+}
+```
+
+With those values defined, running `.smapply`.
+
+```{r}
+sm <- .smapply(sm,
+               add_fat_cells,
+               fat_cell_centroids = fat_cell_centroids,
+               parallel = TRUE,
+               cores = 3,
+               analyze = "regions")
+```
+
+Some validity checks.
+
+Are the cell labels in place?
+
+```{r}
+cellMetadata(sm)[[FINAL_ANNO_NAME]] %>% unique()
+```
+
+Are the fat cell droplets in the right location spatially, and spatial representations are oriented correctly?
+
+```{r fig.height=10, fig.width=10}
+demo_region <- "SchuerchCMLBM_c001_v001_r002_reg001"
+demo_RDL <- projectMetadata(sm) %>%
+  filter(acquisition_id == demo_region) %>%
+  pull(region_display_label)
+
+plotRepresentation(sm[["SchuerchCMLBM_c001_v001_r002_reg001"]], "spatial",
+                   what = FINAL_ANNO_NAME) +
+  gghighlight::gghighlight(variable == "Fat droplet centroid",
+                           use_group_by = FALSE) +
+  ggtitle(demo_RDL)
+```
+
+Looks good!
+
+Saving the output.
+
+```{r}
+saveRDS(sm, file = "sm_annotation_final_with_fatDroplets.RDS")
+```
+
+
+***
+
+# Session info
+
+<details><summary>Click to expand</summary>
+
+```{r session info, results='markup'}
+sessionInfo()
+```
+</details>
+
+

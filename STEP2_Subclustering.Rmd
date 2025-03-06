@@ -1,0 +1,239 @@
+---
+title: "Re-clustering previously unclear clusters"
+author: "Lanzhu Li"
+date: "03/05/2025"
+output: html_document
+title: "R Notebook"
+output: html_notebook
+---
+
+# This process can be iteratively refined in subsequent rounds by modifying this code.  
+
+
+```{r}
+# Load Enable Medicine's R-Cloud Interface package
+library(emconnect) #  Facilitate seamless interaction with our databases from within R.
+
+# Load Enable Medicine's SpatialMap package for organizing and analyzing spatial datasets
+library(SpatialMap) # Represent single-cell spatial expression data in R.
+
+# Load Enable Medicine's facil package to simplify common data science tasks
+library(facil) #  Provide a collection of functions enhancing R's usability.
+
+# Load additional public packages from the tidyverse collection
+library(tidyverse) 
+library(magrittr) 
+library(patchwork) 
+
+```
+
+
+```{r}
+# Establish a connection to Enable Medicine's data platform
+con <- emconnect()
+```
+
+
+```{r}
+# Define the study ID
+STUDY_ID <- 315  # Project ID assigned by Enable Medicine; adjust as necessary
+
+# Define the segmentation version
+SEGMENTATION_VERSION <- 4  # Segmentation version number; adjust as necessary
+
+# Define the biomarker expression version
+BIOMARKER_EXPRESSION_VERSION <- 5  # Biomarker expression version number; adjust as necessary
+
+```
+
+
+```{r}
+# Load the RDS file
+sm <- readRDS("sm_annotation_1.RDS")
+```
+
+
+```{r}
+#Select the column that requires further clustering
+CLUSTER.LABELS <- "CT_annotation_first_round_renamed"
+```
+
+
+
+```{r}
+# Define a list of unclear clusters that require further investigation  
+unclear_clusters <- c("Unknown_cl02",  
+                      "Unknown_cl06",  
+                      "Unknown_cl07",  
+                      "Unknown_cl09",  
+                      "Unknown_cl10")  
+
+# Subset the dataset to retain only the unclear clusters for further analysis  
+sm_unclear <- .smsubset(sm, on = "CLUSTER.LABELS", keep = unclear_clusters) %>%   
+  createAnalysis(regions = Regions(.))  
+
+```
+
+
+
+```{r}
+# Perform UMAP dimensionality reduction and cluster cells
+
+# Set seed for reproducibility
+set.seed(678910)
+
+# Run UMAP on the 'ScaledData' assay of the spatialmap object 'sm'
+# 'n_neighbors' controls the local neighborhood size, adjust as necessary
+# 'min_dist' sets the effective minimum distance between embedded points,adjust as necessary
+sm %<>%
+  runUMAP(
+    data.slot = "ScaledData",   
+    PCA = FALSE,          
+    verbose = TRUE,        
+    n_neighbors = 10,      
+    min_dist = 0.0001)
+
+# Set seed for reproducibility
+set.seed(678910)
+
+# Cluster cells based on their UMAP embeddings
+# 'cluster.resolution' adjusts the granularity of clustering
+sm %<>%
+  clusterCells(
+    cluster.resolution = 3)
+
+```
+
+
+```{r}
+# Visualize UMAP representation with cluster annotations and expression heatmap
+plotRepresentation(sm, "umap", what = ".clusters", raster = TRUE)
+
+# Generate a heatmap of biomarker expression values
+plotExpressionHeatmap(
+  sm,
+  data.slot = "ScaledData",       
+  summary.fun = "median",         
+  summarize.across = ".clusters", 
+  exclude.markers = "nuclear.size", 
+  scaling = "none")
+
+```
+
+
+```{r}
+# Define custom labels for each cluster
+cluster.labels <- c(cl01 = "T cells_cl01",
+                    cl02 = "Unknown_cl02",
+                    cl03 = "B cells_cl03",
+                    cl04 = "Erythrocytes_cl04",
+                    cl05 = "Bone cells_cl05",
+                    cl06 = "Unknown_cl06",
+                    cl07 = "T cells_cl07",
+                    cl08 = "HSPCs_cl08",
+                    cl09 = "B cells_cl09",
+                    cl10 = "Unknown_cl10",
+                    cl11 = "Myeloid cells_cl11",
+                    cl12 = "Myeloid cells_cl12",
+                    cl13 = "Vessels_cl13")
+
+```
+
+
+```{r}
+# Map cluster labels to new descriptive labels
+
+# 'mapValues' replaces old labels with new ones based on the 'cluster.labels' mapping
+new.labels <- mapValues(cellMetadata(sm)$.clusters, cluster.labels)
+
+# Add the new labels as metadata to the 'sm' object
+sm <- addCellMetadata(sm, metadata = new.labels, col.names = "CT_annotation_second_round")
+
+# Extract and view the updated metadata
+sm_metadata <- cellMetadata(sm) %>%
+  select(CT_annotation_second_round, cell.id)
+
+```
+
+
+```{r}
+# View the cell metadata of the spatialmap object 'sm'
+cellMetadata(sm)
+
+# Calculate the total number of cells in 'sm'
+length(cells(sm))
+
+# Retrieve unique values from the 'CT_annotation_second_round' column and sort them in ascending order
+unique(cellMetadata(sm)$CT_annotation_second_round) %>% sort()
+
+# Create a table summarizing the count of each 'CT_annotation_second_round' value, sorted by the annotation
+annotations_table <- cellMetadata(sm) %>%
+  count(CT_annotation_second_round) %>%
+  arrange(CT_annotation_second_round)
+
+# Display the annotations table
+View(annotations_table)
+
+```
+
+
+```{r}
+# Upload cell metadata to the Enable Portal, mapping clusters to CODEX images
+uploadCellMetadata(object = sm,
+                   metadata.name = "CT_annotation_second_round",
+                   data.type = "categorical",
+                   cell.id.name = "cell_id",
+                   annotation.description = "second round cell type clustering")
+```
+
+
+
+```{r}
+#####After checking each cluster from CODEX images, rename clusters
+old_label_column <- c(cl01 = "T cells_cl01",
+                    cl02 = "Unknown_cl02",
+                    cl03 = "B cells_cl03",
+                    cl04 = "Erythrocytes_cl04",
+                    cl05 = "Bone cells_cl05",
+                    cl06 = "Unknown_cl06",
+                    cl07 = "T cells_cl07",
+                    cl08 = "HSPCs_cl08",
+                    cl09 = "B cells_cl09",
+                    cl10 = "Unknown_cl10",
+                    cl11 = "Myeloid cells_cl11",
+                    cl12 = "Myeloid cells_cl12",
+                    cl13 = "Vessels_cl13")
+
+### CHANGE THE VALUES IN THIS VECTOR TO MATCH THE NEW LABELS
+new_label_column <- c(cl01 = "T cells",
+                    cl02 = "Vessels",
+                    cl03 = "B cells",
+                    cl04 = "Unknown_cl04",
+                    cl05 = "Bone cells",
+                    cl06 = "Unknown_cl06",
+                    cl07 = "T cells",
+                    cl08 = "HSPCs",
+                    cl09 = "B cells",
+                    cl10 = "Unknown_cl10",
+                    cl11 = "Myeloid cells",
+                    cl12 = "Myeloid cells",
+                    cl13 = "Vessels")
+
+
+
+Cell.type_labels <- data.frame(old_label_column,
+                               new_label_column)
+
+old.labels <- cellMetadata(sm)[[CT_annotation_first_round]]
+new.labels <- mapValues(old.labels, Cell.type_labels)
+sm %<>% addCellMetadata(metadata = new.labels, col.names = "CT_annotation_second_round_renamed")
+
+```
+
+
+```{r}
+# Save the updated 'sm' object to an RDS file for future use
+saveRDS(sm, file = "sm_annotation_2.RDS")
+```
+
+

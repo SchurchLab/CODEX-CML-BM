@@ -1,0 +1,252 @@
+---
+title: "Clustering for the whole dataset"
+author: "Lanzhu Li"
+date: "03/05/2025"
+output: html_document
+---
+
+
+```{r}
+# Load Enable Medicine's R-Cloud Interface package
+library(emconnect) #  Facilitate seamless interaction with our databases from within R.
+
+# Load Enable Medicine's SpatialMap package for organizing and analyzing spatial datasets
+library(SpatialMap) # Represent single-cell spatial expression data in R.
+
+# Load Enable Medicine's facil package to simplify common data science tasks
+library(facil) #  Provide a collection of functions enhancing R's usability.
+
+# Load additional public packages from the tidyverse collection
+library(tidyverse) 
+library(magrittr) 
+library(patchwork) 
+
+```
+
+
+
+```{r}
+# Establish a connection to Enable Medicine's data platform
+con <- emconnect()
+```
+
+
+```{r}
+# Define the study ID
+STUDY_ID <- 315  # Project ID assigned by Enable Medicine; adjust as necessary
+
+# Define the segmentation version
+SEGMENTATION_VERSION <- 4  # Segmentation version number; adjust as necessary
+
+# Define the biomarker expression version
+BIOMARKER_EXPRESSION_VERSION <- 5  # Biomarker expression version number; adjust as necessary
+
+```
+
+
+```{r}
+# Retrieve and process study region data
+region_table <- get_table("study_regions") %>%  
+  em_join("study_samples") %>%                   
+  em_join("region_display_label", schema = "RND_DERIVED_DATA") %>%  
+  filter(study_id == STUDY_ID, visual_quality) %>% 
+  select(region_display_label, acquisition_id) %>%
+  arrange(acquisition_id) %>%                   
+  em_collect()                                  
+
+# Display the resulting data frame
+region_table
+
+```
+
+
+```{r}
+# Retrieve spatial data from the database and process it
+sm <- spatialmap_from_db(
+  connection = con,  
+  acquisition_ids = region_table$acquisition_id, 
+  segmentation.version = SEGMENTATION_VERSION,  
+  expression.version = BIOMARKER_EXPRESSION_VERSION,
+  neutral.markers = c("Hoechst", "Runx2", "CD115", "TCRgammadelta", "SigH", "DRAQ5", "Blank")  
+) %>% mergeProjectMetadata() 
+
+# Save the processed spatial map object to an RDS file for later use
+saveRDS(sm, "sm_processed.RDS")
+
+```
+
+
+```{r}
+# Add analysis metadata to the spatialmap object
+sm %<>% createAnalysis(id = "combined", regions = Regions(.)) 
+```
+
+
+```{r}
+# Normalize data
+sm %<>%
+  Normalize(method = "asinh", from = "Data", to = "NormalizedData") %>% # Arcsinh transformation to account for heteroscedasticity
+  Normalize(method = "scale", from = "NormalizedData", to = "ScaledData") %>% # center and divide by the standard deviation of the biomarker expression values for each region to account for inter-region variability, and to weigh each of the biomarkers equally in subsequent analysis
+  Normalize(method = "scale", MARGIN = 2, from = "ScaledData", to = "ScaledData")%>% # center and divide by the standard deviation of the biomarker expression values for each individual cell. This will more heavily weight the biomarkers that are the strongest for each cell. Helps account for tissue variability.
+  QCMetrics(DNA = "Hoechst")
+
+```
+
+
+```{r}
+# Perform UMAP dimensionality reduction and cluster cells
+
+# Set seed for reproducibility
+set.seed(123245)
+
+# Run UMAP on the 'ScaledData' assay of the spatialmap object 'sm'
+# 'n_neighbors' controls the local neighborhood size, adjust as necessary
+# 'min_dist' sets the effective minimum distance between embedded points,adjust as necessary
+sm %<>%
+  runUMAP(
+    data.slot = "ScaledData",   
+    PCA = FALSE,          
+    verbose = TRUE,        
+    n_neighbors = 10,      
+    min_dist = 0.0001)
+
+# Set seed for reproducibility
+set.seed(12345)
+
+# Cluster cells based on their UMAP embeddings
+# 'cluster.resolution' adjusts the granularity of clustering
+sm %<>%
+  clusterCells(
+    cluster.resolution = 3)
+
+```
+
+
+```{r}
+# Visualize UMAP representation with cluster annotations and expression heatmap
+plotRepresentation(sm, "umap", what = ".clusters", raster = TRUE)
+
+# Generate a heatmap of biomarker expression values
+plotExpressionHeatmap(
+  sm,
+  data.slot = "ScaledData",       
+  summary.fun = "median",         
+  summarize.across = ".clusters", 
+  exclude.markers = "nuclear.size", 
+  scaling = "none")
+
+```
+
+
+```{r}
+# Define custom labels for each cluster
+cluster.labels <- c(cl01 = "B cells or Vascular_cl01",
+                    cl02 = "Unknown_cl02",
+                    cl03 = "B cells_cl03",
+                    cl04 = "B cells_cl04",
+                    cl05 = "Erythrocytes_cl05",
+                    cl06 = "Unknown_cl06",
+                    cl07 = "Unknown_cl07",
+                    cl08 = "B cells or Megakaryocytes_cl08",
+                    cl09 = "B cells_cl09",
+                    cl10 = "Fat cells or B cells_cl10",
+                    cl11 = "Myeloid cells_cl11",
+                    cl12 = "Myeloid cells or Megakaryocytes_cl12")
+
+```
+
+
+```{r}
+# Map cluster labels to new descriptive labels
+
+# 'mapValues' replaces old labels with new ones based on the 'cluster.labels' mapping
+new.labels <- mapValues(cellMetadata(sm)$.clusters, cluster.labels)
+
+# Add the new labels as metadata to the 'sm' object
+sm <- addCellMetadata(sm, metadata = new.labels, col.names = "CT_annotation_first_round")
+
+# Extract and view the updated metadata
+sm_metadata <- cellMetadata(sm) %>%
+  select(CT_annotation_first_round, cell.id)
+
+```
+
+
+```{r}
+# View the cell metadata of the spatialmap object 'sm'
+cellMetadata(sm)
+
+# Calculate the total number of cells in 'sm'
+length(cells(sm))
+
+# Retrieve unique values from the 'CT_annotation_first_round' column and sort them in ascending order
+unique(cellMetadata(sm)$CT_annotation_first_round) %>% sort()
+
+# Create a table summarizing the count of each 'CT_annotation_first_round' value, sorted by the annotation
+annotations_table <- cellMetadata(sm) %>%
+  count(CT_annotation_first_round) %>%
+  arrange(CT_annotation_first_round)
+
+# Display the annotations table
+View(annotations_table)
+
+```
+
+
+```{r}
+# Upload cell metadata to the Enable Portal, mapping clusters to CODEX images
+uploadCellMetadata(object = sm,
+                   metadata.name = "CT_annotation_first_round",
+                   data.type = "categorical",
+                   cell.id.name = "cell_id",
+                   annotation.description = "first round cell type clustering")
+```
+
+
+
+```{r}
+#####After checking each cluster from CODEX images, rename clusters
+old_label_column <- c(cl01 = "B cells or Vascular_cl01",
+                    cl02 = "Unknown_cl02",
+                    cl03 = "B cells_cl03",
+                    cl04 = "B cells_cl04",
+                    cl05 = "Erythrocytes_cl05",
+                    cl06 = "Unknown_cl06",
+                    cl07 = "Unknown_cl07",
+                    cl08 = "B cells or Megakaryocytes_cl08",
+                    cl09 = "B cells_cl09",
+                    cl10 = "Fat cells or B cells_cl10",
+                    cl11 = "Myeloid cells_cl11",
+                    cl12 = "Myeloid cells or Megakaryocytes_cl12")
+
+### CHANGE THE VALUES IN THIS VECTOR TO MATCH THE NEW LABELS
+new_label_column <- c(cl01 = "B cells",
+                    cl02 = "Unknown_cl02",
+                    cl03 = "B cells",
+                    cl04 = "B cells",
+                    cl05 = "Erythrocytes",
+                    cl06 = "Unknown_cl06",
+                    cl07 = "Unknown_cl07",
+                    cl08 = "B cells",
+                    cl09 = "Unknown_cl09",
+                    cl10 = "Unknown_cl10",
+                    cl11 = "Myeloid cells",
+                    cl12 = "Myeloid cells")
+
+
+
+Cell.type_labels <- data.frame(old_label_column,
+                               new_label_column)
+
+old.labels <- cellMetadata(sm)[[CT_annotation_first_round]]
+new.labels <- mapValues(old.labels, Cell.type_labels)
+sm %<>% addCellMetadata(metadata = new.labels, col.names = "CT_annotation_first_round_renamed")
+
+```
+
+
+```{r}
+# Save the updated 'sm' object to an RDS file for future use
+saveRDS(sm, file = "sm_annotation_1.RDS")
+```
+

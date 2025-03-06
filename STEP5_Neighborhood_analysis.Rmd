@@ -1,0 +1,129 @@
+---
+title: "Neighborhood analysis"
+author: "Lanzhu Li"
+date: "03/05/2025"
+output: html_document
+---
+
+```{r}
+# Load the RDS file containing the final annotated cell dataset 
+sm <- readRDS("sm_annotation_final_with_fatDroplets_megakaryocytes.RDS")
+```
+
+
+```{r}
+# Enable progress display for tracking the execution of processes  
+settings(sm, "show.progress") <- TRUE
+```
+
+
+```{r}
+# Construct a cellular nearest-neighbor graph from the spatial representation  
+sm <- spatialNearestNeighbors(sm,
+                              method = "knn",  # Creat K Nearest Neighbor (KNN) Graph
+                              k = 14,  #The number of K-nearest neighbors, adjust as necessary
+                              name = "spatial_14")
+```
+
+
+
+```{r}
+# Compute cell neighborhoods
+sm <- cellNeighborhoods(sm,
+                        nn = "spatial_14", # The name of a neighbors network which will be used to compute neighborhoods.
+                        feature = "All_cells_combined_final") # the column used to store final annotations for all cells.
+```
+
+
+
+```{r}
+# cellNeighborhoods has been run, clusters the neighborhoods
+set.seed(72184)
+
+sm <- neighborhoodClusters(sm,
+                           nn = "spatial_14", 
+                           k = 16, # How many clusters to produce using k-means on the neighborhood counts matrix.
+                           feature = "All_cells_combined_final")
+```
+
+
+
+```{r}
+# Load the pheatmap library for heatmap plotting
+library(pheatmap)
+
+# Create a contingency table that cross-tabulates the 'nh_spatial_knn_14_All_cells_combined_final' and 'All_cells_combined_final' columns from cell metadata
+# 'nh_spatial_knn_14_All_cells_combined_final' column represents the neighborhood analysis output for spatial KNN analysis
+a <- table(cellMetadata(sm)$nh_spatial_knn_14_All_cells_combined_final, cellMetadata(sm)$All_cells_combined_final)
+
+# View the created table in the R viewer
+View(a)
+
+# Scale the table (normalize the values) to make the heatmap more interpretable
+scaled_a <- scale(a)
+
+# Set a random seed for reproducibility
+set.seed(520)
+
+# Create a heatmap of the scaled table with customized color and other parameters
+pheatmap(scaled_a, 
+         color = colorRampPalette(c("blue", "white", "red"))(100), 
+         show_rownames = TRUE,
+         show_colnames = TRUE, 
+         legend = TRUE, 
+         legend_title = "Value", 
+         border_color = NA, 
+         border = FALSE, 
+         angle_col = 90, 
+         cellwidth = 15, 
+         cellheight = 28) 
+```
+
+
+
+```{r}
+# Rename each neighborhood based on the cell types predominantly enriched in each neighborhood
+neighborhood.labels <- c(
+  neighborhood_1 = "Erythroid_ProE",
+  neighborhood_2 = "Erythroid_EryC",
+  neighborhood_3 = "EryB/granulocyte",
+  neighborhood_4 = "Erythroid_EryC",
+  neighborhood_5 = "Erythroid_EryB",
+  neighborhood_6 = "B cell",
+  neighborhood_7 = "Bone cell",
+  neighborhood_8 = "APC",
+  neighborhood_9 = "Leukemia",
+  neighborhood_10 = "Vasculature",
+  neighborhood_11 = "Granulocyte",
+  neighborhood_12 = "B cell/granulocyte",
+  neighborhood_13 = "Monocyte",
+  neighborhood_14 = "CoMP",
+  neighborhood_15 = "Unidentified",
+  neighborhood_16 = "Erythroid_EryB")
+
+
+raw_values <- as.character(cellMetadata(sm)$nh_spatial_knn_14_All_cells_combined_final)
+
+mapped.vals <- mapValues(raw_values, neighborhood.labels)
+sm <- sm %>% addCellMetadata(mapped.vals, col.names = "Annotated neighborhoods")
+```
+
+
+
+```{r}
+# Upload neighborhood to the Enable Portal, mapping to CODEX images for checking
+uploadCellMetadata(object = sm,
+                   metadata.name = "Annotated neighborhoods",
+                   data.type = "categorical",
+                   cell.id.name = "cell_id",
+                   annotation.description = "Annotated neighborhoods")
+```
+
+
+
+```{r}
+# Save the updated 'sm' object to an RDS file for future use
+saveRDS(sm, file = "sm_annotation_final_with_fatDroplets_megakaryocytes_neighborhood.RDS")
+```
+
+                  

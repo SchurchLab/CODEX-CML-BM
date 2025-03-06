@@ -1,0 +1,154 @@
+
+---
+title: "Pairwise adjacency analysis"
+author: "Lanzhu Li"
+date: "03/05/2025"
+output: html_document
+---
+
+```{r}
+# Load the RDS file containing the final annotated cell dataset 
+sm <- readRDS("sm_annotation_final_with_fatDroplets_megakaryocytes_neighborhood.RDS")
+```
+
+
+
+```{r}
+# Enable progress display for tracking the execution of processes  
+settings(sm, "show.progress") <- TRUE
+```
+
+
+
+```{r}
+# Construct a cellular nearest-neighbor graph from the spatial representation  
+sm <- spatialNearestNeighbors(sm,
+                              method = "knn",  # Creat K Nearest Neighbor (KNN) Graph
+                              k = 10,  #The number of K-nearest neighbors, adjust as necessary
+                              name = "spatial_knn_10")
+```
+
+
+
+```{r}
+# Extract relevant columns from the cellMetadata: 'Region' and 'Group_mice'
+# Filter the data to only include samples from specific groups ('Day0' and 'Day21')
+mouse_labels <- cellMetadata(sm) %>%
+  select(Region, Group_mice) %>%
+  distinct() %>%
+  separate(Group_mice, into = c("Mouse", "Group"), sep = "_") %>%
+  # Dropping some extraneous samples for the purpose of this analysis
+  filter(Group %in% c("Day0", "Day21")) %>%
+  facil::colToRownames(columns = "Region", keep.column = T, return.matrix = F)
+
+# Keep the row names (regions) from the 'mouse_labels' data frame
+keep_regions <- rownames(mouse_labels)
+
+# Subset the 'sm' object to only include the regions present in 'keep_regions'
+sm <- sm[keep_regions]
+
+# Add the 'mouse_labels' as project metadata to the 'sm' object and merge the project metadata
+sm <- addProjectMetadata(sm, mouse_labels) %>%
+  mergeProjectMetadata()
+```
+
+
+
+```{r}
+#Counts cell-cell interactions based on a previously-generated NN graph and computes interaction scores (enrichments and p-values) for each cell pair.
+sm <- pairwiseAdjacency(
+  sm,
+  method = "permutation", # Consider using permutation for sample-level analyses
+  feature = "All_cells_combined_Final",
+  nn = "spatial_knn_10",
+  analyze = "Mouse" #sample-level analysis
+  )
+```
+
+
+
+```{r}
+# Pulling out region names to define each cohort
+cohort1 <- Regions(sm)[projectMetadata(sm)$Group == "Day0"]
+cohort2 <- Regions(sm)[projectMetadata(sm)$Group == "Day21"]
+
+# Run the function
+ca_out <-
+  compareAdjacency(
+    object = sm,
+    feature = "All_cells_combined_Final",
+    nn = "spatial_knn_10",
+    group.1 = cohort1,  
+    group.2 = cohort2)
+```
+
+
+```{r}
+# Extract the 'log_odds_t_test' result from 'ca_out' and process it
+tt_dat <- ca_out$log_odds_t_test %>% 
+  dplyr::arrange(p.value) %>% 
+  dplyr::select(feature1, feature2, p.value, everything())
+
+```
+
+
+
+```{r}
+# Load necessary libraries
+library(dplyr)  
+library(purrr)
+library(magrittr)
+
+
+# Remove one of the same interactions， such as APCs-B cells, B cells-APCs
+Permutation_knn10_Day0_Day21_filtered <- tt_dat %>%
+  mutate(combined_feature = pmap_chr(list(feature1, feature2), ~paste(sort(c(...)), collapse = "-"))) %>%  
+  distinct(combined_feature, .keep_all = TRUE) %>%
+  select(-combined_feature) 
+
+# View the processed data
+View(Permutation_knn10_All_cells)
+
+# Save the processed data frame to a CSV file
+write.csv(Permutation_knn2_All_cells, file = "Permutation_knn10_Day0_Day21_filtered.csv", row.names = FALSE)
+
+```
+
+
+
+```{r}
+# Plot Volcano plot
+
+# Load necessary libraries
+library(dplyr)  # For data manipulation
+library(ggplot2)  # For creating the plot
+library(ggrepel)  # For adding labels with repelling functionality to avoid overlap
+library(ggthemes)  # For additional themes for ggplot
+
+
+plot <- Permutation_knn10_Day0_Day21_filtered %>%
+  dplyr::distinct() %>%
+  mutate(sig = ifelse(p.value < 0.05, "#B83945", "#f2e3e7")) %>%
+  ggplot(aes(x = diff.in.means, y = -log10(p.value))) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey", size = 0.3) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "grey", size = 0.3) +
+  geom_point(aes(color = sig), shape = 19, size = 5) +
+  ggrepel::geom_text_repel(
+    data = dplyr::slice_min(Permutation_knn10_Day0_Day21_filtered, p.value, n = 2),
+    aes(label = paste0(feature1, " : ", feature2)),
+    color = "black",
+    size = 4,
+    min.segment.length = 0.1,
+    force = 5
+  ) +
+  ggthemes::theme_few() +
+  theme(aspect.ratio = 1) +
+  labs(subtitle = "Permutation_knn10_Day0_Day21_filtered") +
+  lims(y = c(0, NA)) +
+  scale_color_manual(values = c("#B83945" = "#B83945", "#f2e3e7" = "#f2e3e7"))
+
+plot
+
+```
+
+
