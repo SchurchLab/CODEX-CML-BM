@@ -3,7 +3,7 @@
 
 ## Introduction
 
-This project’s data analysis is based on the Enable Medicine platform (https://www.enablemedicine.com), which provides an end-to-end workflow for data processing and interpretation. Some of the code packages used in our analysis were internally developed by Enable Medicine and are designed to function exclusively within this platform, so we are unable to share them.
+This project’s data analysis is based on the **Enable Medicine** platform (https://www.enablemedicine.com), which provides an end-to-end workflow for data processing and interpretation. Some of the code packages used in our analysis were internally developed by Enable Medicine and are designed to function exclusively within this platform, so we are unable to share them.
 
 However, we are publicly sharing our analysis pipeline to provide insights into our approach and to help others develop their own workflows. We hope this resource serves as a useful reference for researchers working on similar projects.
 
