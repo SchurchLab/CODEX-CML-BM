@@ -1,55 +1,23 @@
 # CODEX-CML-BM
 
-# Introduction
-
-This project’s data analysis is based on the Enable Medicine platform, which provides an end-to-end workflow for data processing and interpretation. Some of the code packages used in our analysis were internally developed by Enable Medicine and are designed to function exclusively within this platform, so we are unable to share them.
-
-However, we are publicly sharing our analysis pipeline to provide insights into our approach and to help others develop their own workflows. We hope this resource serves as a useful reference for researchers working on similar projects.
-
-## Table of Contents
-
-- [Introduction](#introduction)
-- [Data Access](#data-access)
-- [Dependencies](#dependencies)
-- [Usage](#usage)
-- [Contributing](#contributing)
-- [License](#license)
-- [Contact](#contact)
 
 ## Introduction
 
-[Provide a detailed overview of the project, its objectives, and any relevant background information.]
+This project’s data analysis is based on the Enable Medicine platform (https://www.enablemedicine.com), which provides an end-to-end workflow for data processing and interpretation. Some of the code packages used in our analysis were internally developed by Enable Medicine and are designed to function exclusively within this platform, so we are unable to share them.
 
-## Data Access
+However, we are publicly sharing our analysis pipeline to provide insights into our approach and to help others develop their own workflows. We hope this resource serves as a useful reference for researchers working on similar projects.
 
-This project utilizes data hosted on Enable Medicine's cloud platform. Please note:
 
-- **Access Restrictions**: The datasets are proprietary and require appropriate permissions for access.
-- **Access Procedure**: To request access, please contact Enable Medicine directly or reach out to our team for guidance.
+## Analysis Workflow
 
-Ensure compliance with all applicable data usage agreements and institutional policies when handling this data.
+**Our analysis follows the steps outlined below:**
 
-## Dependencies
+**Segmentation** – This step is performed directly through the Enable Medicine portal.
+**Clustering and subclustering** – Unsupervised clustering of all cells to identify major populations.
+**supervised cell type annotation** – This step is performed directly through the Enable Medicine portal.
+**Fat cell and megakaryocyte incorporation** – These two cell types had weak or unusually shaped nuclear signals, which were poorly captured by our segmentation approach. To remedy this, a manual approach was used to mark the locations of these cell types in the dataset. Subsequently, the centroids of each manually identified cell were calculated and incorporated into the dataset.
+**Neighborhood analysis** – Identification and characterization of spatially associated cell populations to understand local cellular microenvironments.
+**Neighborhood differential enrichment** – A significant coefficient in this model indicates enhanced enrichment of a particular cell type within a cellular neighborhood for one group compared to the other. 
+**Pairwise adjacency analysis** – Pairwise contact analysis identified preferentially co-located pairs of cell types.
 
-The analysis relies on several R packages, some of which are proprietary:
-
-- **Open-source Packages**:
-  - `tidyverse`: A collection of R packages for data science.
-  - `magrittr`: Provides the forward-pipe operator (`%>%`).
-  - `patchwork`: Facilitates combining multiple `ggplot2` plots.
-
-- **Proprietary Packages**:
-  - `emconnect`: [Description of the package's functionality.]
-  - `SpatialMap`: [Description of the package's functionality.]
-  - `facil`: [Description of the package's functionality.]
-
-Access to proprietary packages may require specific permissions or licenses. Please consult the respective package documentation or contact Enable Medicine for more information.
-
-## Usage
-
-To replicate the analysis:
-
-1. **Clone the Repository**:
-
-   ```bash
-   git clone https://github.com/your-group/your-repository.git
+This shared pipeline provides a structured approach to spatial and single-cell data analysis, allowing researchers to adapt and refine it based on their specific needs.
